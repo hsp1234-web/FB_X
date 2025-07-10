@@ -1,0 +1,27 @@
+# pyproject.toml
+[tool.poetry]
+name = "gemini-automation-suite"
+version = "1.0.0"
+description = "A micro-app suite for automating screenshot analysis with Gemini."
+authors = ["Commander"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+google-generativeai = "^0.5.4"
+python-dotenv = "^1.0.1"
+pillow = "^10.4.0"
+keyboard = "^0.13.5"
+PyYAML = "^6.0.1"
+# 我們暫時不將 selenium 或 playwright 放在這裡，因為它與本地環境強相關
+# 將在第三階段的整合說明中提及
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.2"
+black = "^24.4.2"
+ruff = "^0.4.10"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,50 @@
+# config.yaml
+# --- Directory Paths ---
+# 指揮官注意：這些路徑應為相對於專案根目錄的路徑
+# 實際的絕對路徑將由 run_pipeline.py 在執行時動態產生
+paths:
+  main_dir_name: "Gemini AI"
+  screenshots_subdir: "截圖"
+  urls_subdir: "網址文件"
+  processed_subdir: "處理過後的Markdown"
+  archive_subdir: "截圖/processed" # 新增的已處理截圖歸檔路徑
+
+# --- Screenshot Banner Settings ---
+banner:
+  font_path_primary: "msjh.ttc"
+  font_path_fallback: "arial.ttf"
+  font_size: 70
+  text_color: "black"
+  background_color: "white"
+  padding_top_bottom: 25
+  padding_sides: 25
+  frame_border_color: "white"
+  frame_border_size: 20
+
+# --- User Interaction Settings ---
+interaction:
+  beep_frequency: 1200
+  beep_duration: 250
+  auto_mode_default_interval_seconds: 15
+
+# --- API Settings ---
+api:
+  prompt_file_name: "gemini_prompt.txt"
+  keys_models_file_name: "keys_models.txt"
+  # 每組 API Key 內部的重試次數
+  max_retry_per_client: 3
+  # 當客戶端連續失敗 N 次後，暫時將其標記為不健康
+  client_failure_threshold: 5
+  # 客戶端被標記為不健康後，等待多久後嘗試重新啟用 (秒)
+  client_cooldown_period: 300
+  # API 工作執行緒數量 (0 代表使用 os.cpu_count() // 2)
+  num_api_workers: 0
+  # 估計每次請求的Token數 (用於TPM計算)
+  estimated_tokens_per_request: 1000
+
+# --- Model API Limits (RPM/TPM/RPD) ---
+# 這些是速率限制的預設值，實際限制可能因模型而異
+model_limits:
+  "models/gemini-1.5-flash-latest": { "RPM": 2000, "TPM": 2000000 }
+  "models/gemini-1.5-pro-latest": { "RPM": 1000, "TPM": 2000000 }
+  "DEFAULT": { "RPM": 1000, "TPM": 1000000 }
