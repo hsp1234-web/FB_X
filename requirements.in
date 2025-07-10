@@ -1,0 +1,14 @@
+# requirements.in
+
+# 核心 API 與框架
+google-generativeai
+python-dotenv
+PyYAML
+
+# 核心工具
+pillow
+keyboard
+
+# 測試框架
+pytest
+pytest-mock
