@@ -1,4 +1,5 @@
 # requirements.lock.txt
+# VERSION 2.0 - RESOLVED DEPENDENCY CONFLICT
 # This file is generated from requirements.in. Do not edit manually.
 
 # via google-generativeai
@@ -30,8 +31,20 @@ keyboard==0.13.5
 # transitive dependencies
 uritemplate==4.1.1
 tqdm==4.66.4
-pyasn1==0.6.0
-pyasn1-modules==0.4.0
-rsa==4.9
+# RESOLVED: Updated pyasn1 to a compatible version for all dependents
+pyasn1==0.6.1
+pyasn1-modules==0.4.2
+rsa==4.9.1
 cachetools==5.3.3
 httplib2==0.22.0
+pyparsing==3.1.2
+requests==2.32.3
+charset-normalizer==3.3.2
+idna==3.7
+urllib3==2.2.2
+certifi==2024.7.4
+pydantic==2.8.2
+pydantic-core==2.20.1
+annotated-types==0.7.0
+typing-extensions==4.12.2
+typing-inspection==0.4.1
