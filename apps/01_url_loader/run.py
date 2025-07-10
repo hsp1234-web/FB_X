@@ -1,4 +1,4 @@
-# apps/app_01_url_loader/run.py
+# apps/01_url_loader/run.py
 import sys
 import os
 import csv
