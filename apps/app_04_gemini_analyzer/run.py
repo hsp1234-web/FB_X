@@ -28,10 +28,11 @@ def run(
     screenshot_paths: list[str | Path],
     api_pool_instance: APIPool,
     prompt_text: str,
-    output_dir: Path
+    output_dir: Path,
+    db_manager: 'DBManager' # 新增 db_manager 參數並添加類型提示
 ) -> bool:
     """
-    使用 Gemini API 分析提供的截圖，並將結果儲存。
+    使用 Gemini API 分析提供的截圖，並將結果儲存（實現兩階段提交）。
 
     Args:
         item_data (dict): 包含 'date' 和 'title' 等元數據的字典。
@@ -142,7 +143,7 @@ def run(
             current_client = api_pool_instance.get_available_client()
             if not current_client:
                 print(TermColors.red(f"錯誤：第 {attempt + 1} 次嘗試時無法獲取 API 客戶端。"))
-                continue # 嘗試下一次，或者如果這是最後一次則失敗
+                continue
 
         success, text_content, error_msg, should_retry_other = current_client.make_request(contents)
 
@@ -164,25 +165,42 @@ def run(
 
     if not analysis_successful or generated_text is None:
         print(TermColors.red(f"最終分析失敗：項目 '{item_title_str}' 未能從 Gemini API 獲取有效回應。"))
+        # 此處不需要更新任務狀態為 failed，因為 make_request 失敗時，APIPool/GeminiAPIClient 應已處理
+        # 或者 run_pipeline.py 會根據 analyze_with_gemini 的 False 返回值來更新
         print(TermColors.blue(f"--- 微應用 04_gemini_analyzer: 分析失敗 ---"))
         return False
 
-    # 4. 儲存結果
+    # --- 兩階段提交 ---
+    task_id = item_data.get('task_id')
+    if not task_id:
+        print(TermColors.red("錯誤：item_data 中缺少 task_id，無法執行兩階段提交。"))
+        return False
+
+    # 第一階段：將原始回應儲存到資料庫
     try:
+        print(f"第一階段：正在將 task_id '{task_id[:8]}' 的原始 Gemini 回應儲存到資料庫...")
+        db_manager.update_task_raw_response(task_id, generated_text)
+        # 如果使用獨立表：db_manager.add_gemini_response(task_id, generated_text)
+        print(TermColors.green(f"第一階段成功：task_id '{task_id[:8]}' 的原始回應已儲存到資料庫。"))
+    except Exception as e_db_save:
+        print(TermColors.red(f"錯誤：第一階段儲存原始 Gemini 回應到資料庫失敗 (task_id: {task_id[:8]}): {e_db_save}"))
+        # 即使DB儲存失敗，也不更新任務狀態為 failed，因為原始回應仍在記憶體中，可能後續會有其他處理
+        # 但此操作應被視為失敗，以便主流程決定如何處理
+        return False # 表示此微應用執行失敗
+
+    # 第二階段：將最終結果寫入到檔案
+    try:
+        print(f"第二階段：正在將 task_id '{task_id[:8]}' 的分析結果寫入檔案...")
+
         # 格式化日期用於檔案名稱
         try:
-            # 假設 item_data['date'] 是 YYYYMMDD
             output_date_str = datetime.strptime(item_date_str, "%Y%m%d").strftime("%Y-%m-%d")
         except ValueError:
-            output_date_str = item_date_str # 如果格式不符，使用原始字串
+            output_date_str = item_date_str
 
         sanitized_title_for_filename = sanitize_filename(item_title_str)
         timestamp_for_filename = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-        # 從客戶端獲取模型名稱並清理
         model_name_for_filename = sanitize_filename(current_client.model_name.replace("models/", ""))
-
-        # 組合輸出檔案名稱：日期_標題_時間戳_模型名稱.md (或 .txt)
         output_filename_ext = APP_CONFIG['api'].get('output_file_extension', 'md')
         output_filename = f"{output_date_str}_{sanitized_title_for_filename}_{timestamp_for_filename}_{model_name_for_filename}.{output_filename_ext}"
         output_filepath = output_dir / output_filename
@@ -190,15 +208,22 @@ def run(
         with open(output_filepath, 'w', encoding='utf-8') as f:
             f.write(generated_text)
 
-        print(TermColors.green(f"✔ 分析結果已成功儲存至: {output_filepath}"))
-        print(TermColors.blue(f"--- 微應用 04_gemini_analyzer: 執行成功 ---"))
+        print(TermColors.green(f"✔ 第二階段成功：分析結果已儲存至檔案: {output_filepath}"))
+        print(TermColors.blue(f"--- 微應用 04_gemini_analyzer: 執行成功 (兩階段提交完成) ---"))
         return True
 
-    except Exception as e_save:
-        print(TermColors.red(f"錯誤：儲存分析結果時發生異常: {e_save}"))
+    except Exception as e_file_save:
+        print(TermColors.red(f"錯誤：第二階段寫入分析結果到檔案失敗 (task_id: {task_id[:8]}): {e_file_save}"))
         import traceback
         print(TermColors.yellow(traceback.format_exc()))
-        print(TermColors.blue(f"--- 微應用 04_gemini_analyzer: 儲存失敗 ---"))
+        # 檔案寫入失敗，但原始回應已在DB中。主流程應將任務標記為需要注意，或允許從DB恢復。
+        # 此處返回 True 還是 False 取決於策略。如果檔案是最終目標，則應返回 False。
+        # 但由於原始數據已保存，這裡可以認為主要部分成功，但有警告。
+        # 為了讓 run_pipeline.py 知道有問題，返回 False 可能是更安全的選擇，然後由 run_pipeline 更新任務狀態。
+        # 或者，此處更新任務狀態為例如 'completed_raw_db_only'。
+        # 暫定：如果檔案寫入失敗，也視為此微應用未完全成功。
+        db_manager.update_task_status(task_id, 'failed', f"檔案寫入失敗，但原始回應已存DB: {e_file_save}")
+        print(TermColors.blue(f"--- 微應用 04_gemini_analyzer: 檔案寫入失敗 ---"))
         return False
 
 

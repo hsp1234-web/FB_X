@@ -5,10 +5,10 @@
 paths:
   main_dir_name: "data/Gemini_AI_Output_Default" # 指向包含測試 CSV 的 data 子目錄
   output_relative_to_project_root: true # 確保相對於專案根目錄
-  screenshots_subdir: "截圖"
+  screenshots_subdir: "screenshots" # 改為英文
   urls_subdir: "urls_dir" # CSV 檔案在此子目錄下
-  processed_subdir: "處理過後的Markdown"
-  archive_subdir: "截圖/processed" # 新增的已處理截圖歸檔路徑
+  processed_subdir: "processed_markdown" # 改為英文
+  archive_subdir: "screenshots/processed" # 相應更新歸檔路徑，也用英文
 
 # --- Screenshot Banner Settings ---
 banner:

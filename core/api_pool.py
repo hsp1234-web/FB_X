@@ -62,14 +62,10 @@ class GeminiAPIClient:
                 # TODO: 根據 config.yaml 中的設定來配置 generation_config 和 safety_settings
                 # 例如: self.model_instance = genai.GenerativeModel(self.model_name, generation_config=..., safety_settings=...)
                 self.model_instance = genai.GenerativeModel(self.model_name)
-                # 執行一個小請求來驗證 API 金鑰是否有效
-                # 為避免不必要的費用和速率消耗，此處的測試請求可以考慮移除或做得更輕量
-                # test_response = self.model_instance.generate_content("Hello", stream=False)
-                # if not test_response.text:
-                #     raise Exception("API key might be invalid or model not accessible (empty test response).")
+                # 移除了 API 金鑰驗證的測試請求，將在實際請求時驗證
                 self.is_healthy = True
                 self.error_count = 0
-                print(TermColors.green(f"客戶端 {self.client_id} ({self.model_name}) 已成功初始化。"))
+                print(TermColors.green(f"客戶端 {self.client_id} ({self.model_name}) 已成功初始化（未執行測試請求）。"))
                 return True
             except Exception as e:
                 print(TermColors.red(f"客戶端 {self.client_id} ({self.model_name}) 初始化失敗或 API 金鑰驗證失敗: {e}"))
@@ -393,21 +389,23 @@ class APIPool:
                                 min_wait_time = min(min_wait_time, cooldown_remaining)
                             # else: client is unhealthy but cooldown expired, will be checked in next loop iteration
 
-                    wait_interval = min(min_wait_time, 5.0) if min_wait_time != float('inf') else 5.0 # 最小等待5秒或計算出的時間
-                    wait_interval = max(1.0, wait_interval) # 至少等待1秒
+                    if min_wait_time == float('inf'):
+                        # 這種情況通常意味著所有客戶端都永久性失敗且無法從冷卻中恢復
+                        print(TermColors.red("APIPool：所有客戶端都不可用，且沒有明確的恢復時間點（可能都永久失敗）。等待 60 秒後重試..."))
+                        time.sleep(60)
+                    elif min_wait_time > 60: # 如果最短等待時間太長（例如幾小時後的RPD重置）
+                        print(TermColors.yellow(f"APIPool：下一個客戶端可用預計在 {min_wait_time:.2f} 秒後。將每 30 秒檢查一次狀態..."))
+                        time.sleep(30) # 較短輪詢，以防配置變化或其他客戶端更快恢復
+                    else:
+                        actual_wait = max(1.0, min_wait_time + 0.1) # 等待計算出的時間 + 緩衝，至少1秒
+                        print(TermColors.yellow(f"APIPool：所有 API 客戶端目前都不可用。將等待約 {actual_wait:.2f} 秒後重試..."))
+                        time.sleep(actual_wait)
 
-                    if all_in_cooldown and min_wait_time == float('inf'): # 所有都不健康，且冷卻期都已過但重啟失敗
-                        print(TermColors.red("APIPool：所有客戶端都處於不健康狀態，且無法從冷卻中恢復。請檢查 API 金鑰或網路。等待 10 秒後重試..."))
-                        wait_interval = 10.0
-                    # else:
-                        # print(TermColors.yellow(f"APIPool：所有 API 客戶端目前都不可用。將等待約 {wait_interval:.2f} 秒後重試..."))
-
-                    time.sleep(wait_interval)
                     checked_clients_in_current_round.clear() # 新的一輪等待後，清空已檢查集合
 
                     # 如果等待時間過長，可能是配置問題
                     if time.time() - start_time > 300: # 等待超過5分鐘
-                        print(TermColors.red("APIPool 警告：所有 API 客戶端長時間不可用。請檢查您的金鑰、模型、速率限制設定或網路連線。"))
+                        print(TermColors.red("APIPool 警告：所有 API 客戶端長時間不可用（超過5分鐘）。請檢查您的金鑰、模型、速率限制設定或網路連線。"))
                         start_time = time.time() # 重置計時器，避免連續報警
 
 

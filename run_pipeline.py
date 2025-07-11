@@ -16,7 +16,7 @@ except Exception as e:
 
 # 核心模組導入
 from core.config_loader import APP_CONFIG
-from core.utils import TermColors, attempt_create_dir # sanitize_filename 可能不再直接於此使用
+from core.utils import TermColors, attempt_create_dir, sanitize_filename
 from core.settings_loader import load_api_configs_from_file, get_api_keys_filepath, create_default_keys_models_file
 from core.api_pool import APIPool
 from core.db_manager import DBManager # 導入 DBManager
@@ -322,12 +322,12 @@ def main():
                     db_manager.update_task_status(task_id, 'processing_gemini')
 
                     analysis_success = analyze_with_gemini(
-                        item_data=item_data,
+                        item_data=item_data, # 包含 task_id
                         screenshot_paths=[str(p) for p in all_screenshot_paths_for_task],
                         api_pool_instance=api_pool_instance,
                         prompt_text=gemini_prompt_text,
                         output_dir=dir_paths["processed_dir"],
-                        db_manager=db_manager
+                        db_manager=db_manager # 傳遞 db_manager
                     )
                     if analysis_success:
                         db_manager.update_task_status(task_id, 'completed')
