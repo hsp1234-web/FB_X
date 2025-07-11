@@ -4,6 +4,7 @@ import threading
 import random
 import google.generativeai as genai
 from google.api_core import exceptions
+from google.generativeai.types import BlockedPromptException # 正確導入
 from pathlib import Path
 import os # For os.cpu_count()
 
@@ -177,7 +178,7 @@ class GeminiAPIClient:
             # print(TermColors.green(f"客戶端 {self.client_id} ({self.model_name}) 已標記為健康。"))
 
 
-    def make_request(self, contents, retry_count=0):
+    def make_request(self, contents, retry_count=0, item_data_for_test=None): # 新增 item_data_for_test
         """
         執行 API 請求，包含指數退避重試邏輯。
         返回 (success, generated_text, error_message, should_retry_with_other_client)
@@ -204,7 +205,7 @@ class GeminiAPIClient:
             self.mark_healthy()
             return True, generated_text, None, False
 
-        except exceptions.BlockedPromptException as e:
+        except BlockedPromptException as e: # 直接使用導入的 BlockedPromptException
             error_msg = f"客戶端 {self.client_id}：提示詞或回應內容違反政策，已被阻擋。詳細錯誤: {e}"
             print(TermColors.red(error_msg))
             self.mark_unhealthy(reason="BLOCKED_PROMPT")

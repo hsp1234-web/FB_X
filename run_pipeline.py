@@ -329,6 +329,14 @@ def main():
                         output_dir=dir_paths["processed_dir"],
                         db_manager=db_manager # 傳遞 db_manager
                     )
+
+                    # --- 斷點續傳測試的中斷點已移除 ---
+                    # if item_data.get('title', "") == "Test Example" and analysis_success:
+                    #     logger.info(TermColors.yellow("--- 自動測試：斷點續傳 - 模擬在 Test Example 分析完成後、狀態更新為 completed 前中斷 ---"))
+                    #     db_manager.close()
+                    #     sys.exit("自動測試：模擬中斷以測試斷點續傳")
+                    # --- 測試結束 ---
+
                     if analysis_success:
                         db_manager.update_task_status(task_id, 'completed')
                         logger.info(f"  項目 '{item_data.get('title')}' 分析完成並儲存，任務狀態更新為 'completed'。")

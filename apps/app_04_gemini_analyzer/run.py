@@ -145,7 +145,7 @@ def run(
                 print(TermColors.red(f"錯誤：第 {attempt + 1} 次嘗試時無法獲取 API 客戶端。"))
                 continue
 
-        success, text_content, error_msg, should_retry_other = current_client.make_request(contents)
+        success, text_content, error_msg, should_retry_other = current_client.make_request(contents, item_data_for_test=item_data) # 傳遞 item_data
 
         if success:
             generated_text = text_content
@@ -182,6 +182,13 @@ def run(
         db_manager.update_task_raw_response(task_id, generated_text)
         # 如果使用獨立表：db_manager.add_gemini_response(task_id, generated_text)
         print(TermColors.green(f"第一階段成功：task_id '{task_id[:8]}' 的原始回應已儲存到資料庫。"))
+
+        # --- 斷點續傳測試的中斷點已移除 ---
+        # if item_data.get('title', "") == "Test Example":
+        #     print(TermColors.yellow("--- 自動測試：斷點續傳 - 模擬在 DB 儲存後、文件寫入前中斷 ---"))
+        #     sys.exit("自動測試：模擬中斷於 analyze_with_gemini 內部")
+        # --- 測試結束 ---
+
     except Exception as e_db_save:
         print(TermColors.red(f"錯誤：第一階段儲存原始 Gemini 回應到資料庫失敗 (task_id: {task_id[:8]}): {e_db_save}"))
         # 即使DB儲存失敗，也不更新任務狀態為 failed，因為原始回應仍在記憶體中，可能後續會有其他處理
