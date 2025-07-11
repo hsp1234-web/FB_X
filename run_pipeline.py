@@ -1,309 +1,368 @@
 import sys
 from pathlib import Path
 import time # 用於延遲等
+import logging # 引入日誌模組
 
-# 由於此檔案在專案根目錄，理論上不需要複雜的路徑校正來導入 core 和 apps
-# 但為了確保一致性，可以保留一個簡單的檢查
+# --- 路徑自我校正樣板碼 ---
 try:
     project_root = Path(__file__).resolve().parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 except Exception as e:
-    print(f"專案路徑校正時發生錯誤 (run_pipeline.py): {e}", file=sys.stderr)
+    # 使用 logging 記錄錯誤，而不是 print
+    logging.error(f"專案路徑校正時發生錯誤 (run_pipeline.py): {e}", exc_info=True)
     project_root = Path.cwd() # Fallback
+# --- 路徑自我校正樣板碼結束 ---
 
 # 核心模組導入
 from core.config_loader import APP_CONFIG
-from core.utils import TermColors, attempt_create_dir, sanitize_filename
+from core.utils import TermColors, attempt_create_dir # sanitize_filename 可能不再直接於此使用
 from core.settings_loader import load_api_configs_from_file, get_api_keys_filepath, create_default_keys_models_file
 from core.api_pool import APIPool
+from core.db_manager import DBManager # 導入 DBManager
 
 # 微應用導入
-from apps.app_01_url_loader.run import run as load_urls
+# app_01_url_loader.run 現在需要 db_manager 實例
+from apps.app_01_url_loader.run import run as load_urls_to_db, get_tasks_for_processing
 from apps.app_02_browser_automation.run import run as manage_browser
 from apps.app_03_screenshot_capture.run import run as capture_screenshot
+# app_04_gemini_analyzer.run 可能也需要 db_manager (用於兩階段提交)
 from apps.app_04_gemini_analyzer.run import run as analyze_with_gemini
 
-# project_root is defined at the module level from the try-except block above.
+
+# 設定全域日誌記錄器
+# 建議在應用程式的進入點（如此處）配置根日誌記錄器
+# 這樣，所有模組中通過 logging.getLogger(__name__) 獲取的日誌記錄器都會繼承此設定
+logging.basicConfig(
+    level=logging.INFO, # 可以從設定檔讀取日誌級別
+    format='%(asctime)s - %(levelname)s - [%(module)s.%(funcName)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout), # 輸出到控制台
+        # logging.FileHandler("pipeline.log", encoding='utf-8') # 可以選擇性地輸出到檔案
+    ]
+)
+logger = logging.getLogger(__name__)
+
 
 def display_welcome_message():
-    print(TermColors.green("======================================================"))
-    print(TermColors.green("===   歡迎使用 Gemini 自動化作戰套件 v2.0 (Jules版) ==="))
-    print(TermColors.green("======================================================"))
-    print(f"指揮中心設定檔: {TermColors.yellow('config.yaml')}")
-    api_keys_display_path = get_api_keys_filepath() # Uses project_root from settings_loader
+    logger.info(TermColors.green("======================================================"))
+    logger.info(TermColors.green("===   歡迎使用 Gemini 自動化作戰套件 v2.1 (Jules DB版) ==="))
+    logger.info(TermColors.green("======================================================"))
+    logger.info(f"指揮中心設定檔: {TermColors.yellow('config.yaml')}")
+    api_keys_display_path = get_api_keys_filepath()
     prompt_filename_display = APP_CONFIG['api'].get('prompt_file_name', 'gemini_prompt.txt')
-    # Ensure project_root is correctly referenced for display path
-    # project_root is defined at the module level, should be accessible
     prompt_file_display_path = project_root / prompt_filename_display
-    print(f"API金鑰設定檔: {TermColors.yellow(str(api_keys_display_path))}")
-    print(f"Gemini提示詞檔: {TermColors.yellow(str(prompt_file_display_path))}")
-    print("-" * 54)
+    db_path_display = project_root / "data" / "database.db" # 假設的 DB 路徑
+    logger.info(f"資料庫檔案預期位置: {TermColors.yellow(str(db_path_display))}")
+    logger.info(f"API金鑰設定檔: {TermColors.yellow(str(api_keys_display_path))}")
+    logger.info(f"Gemini提示詞檔: {TermColors.yellow(str(prompt_file_display_path))}")
+    logger.info("-" * 54)
 
 def load_gemini_prompt() -> str:
-    """載入 Gemini API 的提示詞文字。"""
-    # project_root is defined at the module level
     prompt_filename = APP_CONFIG['api'].get('prompt_file_name', 'gemini_prompt.txt')
     prompt_filepath = project_root / prompt_filename
-
     if not prompt_filepath.is_file():
-        print(TermColors.red(f"錯誤：Gemini 提示詞檔案 '{prompt_filepath}' 未找到。"))
-        print(TermColors.yellow("請確保提示詞檔案存在於專案根目錄，或在 config.yaml 中正確設定路徑。"))
+        logger.error(f"錯誤：Gemini 提示詞檔案 '{prompt_filepath}' 未找到。")
+        logger.warning("請確保提示詞檔案存在於專案根目錄，或在 config.yaml 中正確設定路徑。")
         try:
             default_prompt_content = "# 請在此處填寫您的 Gemini API 提示詞。\n# 例如：請分析以下圖片中的內容，並提取關鍵資訊。\n"
             prompt_filepath.write_text(default_prompt_content, encoding='utf-8')
-            print(TermColors.green(f"已創建一個提示詞檔案範本: '{prompt_filepath}'。請填寫有效的提示詞內容。"))
+            logger.info(f"已創建一個提示詞檔案範本: '{prompt_filepath}'。請填寫有效的提示詞內容。")
         except Exception as e_create_prompt:
-            print(TermColors.red(f"嘗試創建空的提示詞檔案失敗: {e_create_prompt}"))
+            logger.error(f"嘗試創建空的提示詞檔案失敗: {e_create_prompt}")
         return ""
-
     try:
-        with open(prompt_filepath, 'r', encoding='utf-8') as f:
-            prompt_text = f.read()
+        prompt_text = prompt_filepath.read_text(encoding='utf-8')
         if not prompt_text.strip():
-            print(TermColors.yellow(f"警告：Gemini 提示詞檔案 '{prompt_filepath}' 為空。"))
-            print(TermColors.yellow("分析結果可能不符合預期。請填寫有效的提示詞。"))
+            logger.warning(f"警告：Gemini 提示詞檔案 '{prompt_filepath}' 為空。分析結果可能不符合預期。")
         else:
-            print(TermColors.green(f"已成功從 '{prompt_filepath}' 載入 Gemini 提示詞。"))
+            logger.info(f"已成功從 '{prompt_filepath}' 載入 Gemini 提示詞。")
         return prompt_text
     except Exception as e:
-        print(TermColors.red(f"錯誤：讀取 Gemini 提示詞檔案 '{prompt_filepath}' 失敗: {e}"))
+        logger.error(f"錯誤：讀取 Gemini 提示詞檔案 '{prompt_filepath}' 失敗: {e}")
         return ""
 
 def initialize_api_pool() -> APIPool | None:
-    """初始化 API Pool。"""
-    print(TermColors.blue("--- 正在初始化 API Pool ---"))
-    api_keys_file_path = get_api_keys_filepath() # This function itself uses project_root from its own module if needed.
-
+    logger.info(TermColors.blue("--- 正在初始化 API Pool ---"))
+    api_keys_file_path = get_api_keys_filepath()
     if not api_keys_file_path.is_file():
-        print(TermColors.yellow(f"API 金鑰設定檔 '{api_keys_file_path.name}' 在預期位置 '{api_keys_file_path.parent}' 未找到。"))
+        logger.warning(f"API 金鑰設定檔 '{api_keys_file_path.name}' 在預期位置 '{api_keys_file_path.parent}' 未找到。")
+        # ... (創建預設檔案的邏輯保持不變, 使用 logger 替代 print)
         should_create_default = APP_CONFIG.get('interaction', {}).get('create_default_api_keys_file_if_missing', True)
         if should_create_default:
-            print(TermColors.yellow("將嘗試創建一個範例 API 金鑰設定檔。"))
+            logger.info("將嘗試創建一個範例 API 金鑰設定檔。")
             if not create_default_keys_models_file(api_keys_file_path):
-                print(TermColors.red("創建範例 API 金鑰檔失敗。請手動創建或檢查權限。"))
+                logger.error("創建範例 API 金鑰檔失敗。請手動創建或檢查權限。")
                 return None
-            print(TermColors.green(f"範例 API 金鑰檔已創建於 '{api_keys_file_path}'。"))
-            print(TermColors.red("請務必編輯此檔案，填入您真實的 API 金鑰和模型，然後重新執行程式。"))
+            logger.info(f"範例 API 金鑰檔已創建於 '{api_keys_file_path}'。")
+            logger.critical("請務必編輯此檔案，填入您真實的 API 金鑰和模型，然後重新執行程式。") # Critical
             return None
         else:
-            print(TermColors.red(f"自動創建 API 金鑰檔功能已在 config.yaml 中禁用。請手動於 '{api_keys_file_path}' 創建設定檔。"))
+            logger.error(f"自動創建 API 金鑰檔功能已在 config.yaml 中禁用。請手動於 '{api_keys_file_path}' 創建設定檔。")
             return None
 
     client_configs = load_api_configs_from_file(api_keys_file_path)
     if not client_configs:
-        print(TermColors.red(f"未能從 '{api_keys_file_path.name}' 載入任何有效的 API 金鑰設定。"))
-        print(TermColors.yellow("請檢查檔案內容是否正確，並包含至少一個有效的、未被註解的 API 金鑰和模型。"))
+        logger.error(f"未能從 '{api_keys_file_path.name}' 載入任何有效的 API 金鑰設定。")
+        logger.warning("請檢查檔案內容是否正確，並包含至少一個有效的、未被註解的 API 金鑰和模型。")
         return None
-
     try:
         api_pool = APIPool(client_configs)
         if not api_pool.clients:
-             print(TermColors.red("APIPool 初始化後沒有可用的客戶端。"))
-             print(TermColors.yellow("這通常表示提供的 API 金鑰無效、過期、模型名稱不正確、金鑰設定檔中沒有有效的金鑰，或網路問題。"))
+             logger.error("APIPool 初始化後沒有可用的客戶端。")
+             logger.warning("這通常表示提供的 API 金鑰無效、過期、模型名稱不正確、金鑰設定檔中沒有有效的金鑰，或網路問題。")
              return None
-        print(TermColors.green(f"API Pool 初始化成功，共載入 {len(api_pool.clients)} 個可用客戶端。"))
+        logger.info(f"API Pool 初始化成功，共載入 {len(api_pool.clients)} 個可用客戶端。")
         return api_pool
     except Exception as e_pool:
-        print(TermColors.red(f"初始化 APIPool 時發生嚴重錯誤: {e_pool}"))
-        import traceback
-        print(TermColors.yellow(traceback.format_exc()))
+        logger.error(f"初始化 APIPool 時發生嚴重錯誤: {e_pool}", exc_info=True)
         return None
 
 def setup_project_directories(base_output_relative_to_project_root: bool = False) -> dict[str, Path] | None:
-    """
-    根據 config.yaml 設定並創建專案所需的工作目錄。
-    返回一個包含各種路徑的字典，如果關鍵目錄創建失敗則返回 None。
-    """
-    # project_root is defined at the module level
-    print(TermColors.blue("--- 正在設定專案工作目錄 ---"))
+    logger.info(TermColors.blue("--- 正在設定專案工作目錄 ---"))
     paths_config = APP_CONFIG.get('paths', {})
     main_dir_name_from_config = paths_config.get('main_dir_name', 'Gemini_AI_Output_Default')
 
     if Path(main_dir_name_from_config).is_absolute():
         main_dir = Path(main_dir_name_from_config)
-        print(TermColors.blue(f"偵測到絕對路徑設定 main_dir_name: {main_dir}"))
+        logger.info(f"偵測到絕對路徑設定 main_dir_name: {main_dir}")
     elif base_output_relative_to_project_root:
         main_dir = project_root / main_dir_name_from_config
-        print(TermColors.blue(f"輸出主目錄將位於專案根目錄下: {main_dir}"))
+        logger.info(f"輸出主目錄將位於專案根目錄下: {main_dir}")
     else:
         try:
             desktop_path = Path.home() / "Desktop"
             if not desktop_path.is_dir():
-                print(TermColors.yellow(f"警告：無法定位桌面路徑 '{desktop_path}'。將嘗試在專案根目錄下 ({project_root}) 創建輸出。"))
+                logger.warning(f"警告：無法定位桌面路徑 '{desktop_path}'。將嘗試在專案根目錄下 ({project_root}) 創建輸出。")
                 main_dir = project_root / main_dir_name_from_config
             else:
                 main_dir = desktop_path / main_dir_name_from_config
         except Exception as e_desktop:
-            print(TermColors.yellow(f"獲取桌面路徑時發生錯誤: {e_desktop}。將嘗試在專案根目錄下 ({project_root}) 創建輸出。"))
+            logger.warning(f"獲取桌面路徑時發生錯誤: {e_desktop}。將嘗試在專案根目錄下 ({project_root}) 創建輸出。")
             main_dir = project_root / main_dir_name_from_config
+
+    # 資料庫目錄也應在此處處理，或由 DBManager 內部處理其路徑
+    db_dir = project_root / "data" # DBManager 內部會創建 data 子目錄
 
     urls_subdir = paths_config.get('urls_subdir', '網址文件')
     screenshots_subdir = paths_config.get('screenshots_subdir', '截圖')
     processed_subdir = paths_config.get('processed_subdir', '處理過後的Markdown')
 
-    urls_path = main_dir / urls_subdir
-    screenshots_path = main_dir / screenshots_subdir
-    processed_path = main_dir / processed_subdir
+    urls_path = main_dir / urls_subdir # CSV 檔案的讀取路徑
+    screenshots_path = main_dir / screenshots_subdir # 截圖儲存路徑
+    processed_path = main_dir / processed_subdir # Markdown 儲存路徑
 
     if not attempt_create_dir(main_dir, is_required=True): return None
+    if not attempt_create_dir(db_dir, is_required=True): return None # 確保 data 目錄存在
     if not attempt_create_dir(urls_path, is_required=True): return None
     if not attempt_create_dir(screenshots_path, is_required=True): return None
     if not attempt_create_dir(processed_path, is_required=True): return None
 
-    print(TermColors.green("專案工作目錄設定完成。"))
-    print(f"  網址文件將從此讀取: {TermColors.yellow(str(urls_path))}")
-    print(f"  截圖將儲存於: {TermColors.yellow(str(screenshots_path))}")
-    print(f"  處理結果將儲存於: {TermColors.yellow(str(processed_path))}")
-    print("-" * 54)
+    logger.info("專案工作目錄設定完成。")
+    logger.info(f"  資料庫目錄: {TermColors.yellow(str(db_dir))}")
+    logger.info(f"  網址CSV文件將從此讀取: {TermColors.yellow(str(urls_path))}")
+    logger.info(f"  截圖將儲存於: {TermColors.yellow(str(screenshots_path))}")
+    logger.info(f"  處理結果將儲存於: {TermColors.yellow(str(processed_path))}")
+    logger.info("-" * 54)
 
     return {
         "main_dir": main_dir,
+        "db_dir": db_dir, # 新增資料庫目錄的路徑
         "urls_dir": urls_path,
         "screenshots_dir": screenshots_path,
         "processed_dir": processed_path
     }
 
 def get_user_action() -> str:
-    """獲取使用者的操作指令。"""
     while True:
-        print("-" * 30)
-        print(f"{TermColors.blue('可用操作:')}")
-        print(f"  {TermColors.green('W')} : 進行截圖")
-        print(f"  {TermColors.green('Enter')} : (不輸入任何內容直接按 Enter) 提交當前項目已截取的圖片進行分析，並處理下一項目")
-        print(f"  {TermColors.green('S')} : 跳過分析，直接處理下一項目 (不會提交當前截圖)")
-        print(f"  {TermColors.green('R')} : 重新開啟當前項目的網址")
-        print(f"  {TermColors.red('Q')} : 退出程式")
+        logger.info("-" * 30)
+        logger.info(f"{TermColors.blue('可用操作:')}")
+        logger.info(f"  {TermColors.green('W')} : 進行截圖")
+        logger.info(f"  {TermColors.green('Enter')} : (不輸入任何內容直接按 Enter) 提交當前項目已截取的圖片進行分析，並處理下一項目")
+        logger.info(f"  {TermColors.green('S')} : 跳過分析並標記為 'skipped'，直接處理下一項目 (不會提交當前截圖)")
+        logger.info(f"  {TermColors.green('R')} : 重新開啟當前項目的網址")
+        logger.info(f"  {TermColors.red('Q')} : 退出程式")
         choice = input(f"{TermColors.yellow('請輸入您的選擇 (W, Enter, S, R, Q): ')}").strip().upper()
-
         if choice in ['W', '', 'S', 'R', 'Q']:
-            if choice == '':
-                return "ENTER"
-            return choice
+            return "ENTER" if choice == '' else choice
         else:
-            print(TermColors.red("無效輸入，請重新選擇。"))
+            logger.error("無效輸入，請重新選擇。")
+
 
 def main():
-    """總指揮流程"""
-    # project_root is defined at the module level and should be accessible here.
-
     display_welcome_message()
+
+    # 初始化 DBManager
+    db_path = project_root / "data" / "database.db"
+    db_manager = DBManager(db_path=str(db_path))
+    # init_db 會在 DBManager 內部被調用，確保目錄和表存在
 
     api_pool_instance = initialize_api_pool()
     if not api_pool_instance:
-        print(TermColors.red("API Pool 初始化失敗，程式無法繼續。請檢查設定與日誌。"))
+        logger.critical("API Pool 初始化失敗，程式無法繼續。請檢查設定與日誌。")
         sys.exit(1)
 
     gemini_prompt_text = load_gemini_prompt()
     if not gemini_prompt_text:
-        print(TermColors.red("Gemini 提示詞載入失敗或為空。"))
+        logger.error("Gemini 提示詞載入失敗或為空。")
         if APP_CONFIG.get('interaction',{}).get('exit_on_empty_prompt', True):
-            print(TermColors.red("因提示詞無效，程式結束。請填寫提示詞檔案。"))
+            logger.critical("因提示詞無效，程式結束。請填寫提示詞檔案。")
             sys.exit(1)
         else:
-            print(TermColors.yellow("警告: 提示詞為空，將繼續執行，但分析結果可能不佳。"))
+            logger.warning("警告: 提示詞為空，將繼續執行，但分析結果可能不佳。")
 
     output_relative_to_root = APP_CONFIG.get('paths', {}).get('output_relative_to_project_root', False)
     dir_paths = setup_project_directories(base_output_relative_to_project_root=output_relative_to_root)
     if not dir_paths:
-        print(TermColors.red("專案目錄設定失敗，程式無法繼續。"))
+        logger.critical("專案目錄設定失敗，程式無法繼續。")
         sys.exit(1)
 
-    print(TermColors.blue("\n--- 階段一：載入任務清單 ---"))
-    task_items = load_urls(dir_paths["urls_dir"])
+    logger.info(TermColors.blue("\n--- 階段一：從 CSV 載入新任務到資料庫 ---"))
+    # load_urls_to_db 現在接受 db_manager 實例
+    num_new_tasks_from_csv = load_urls_to_db(dir_paths["urls_dir"], db_manager)
+    if num_new_tasks_from_csv > 0:
+        logger.info(f"從 CSV 文件成功載入或更新了 {num_new_tasks_from_csv} 個任務到資料庫。")
+    else:
+        logger.info("CSV 文件中沒有新的任務需要載入。")
 
-    if not task_items:
-        print(TermColors.yellow("沒有從網址文件載入任何任務。請檢查對應資料夾或檔案內容。"))
-        print(TermColors.blue("--- 程式執行完畢 (無任務) ---"))
+    logger.info(TermColors.blue("\n--- 階段二：從資料庫獲取待處理任務 ---"))
+    # 獲取所有非 'completed' 或 'skipped' 狀態的任務
+    task_items_from_db = db_manager.get_unfinished_tasks()
+    # task_items = get_tasks_for_processing(db_manager) # 或者只處理 pending/failed/human_intervention
+
+    if not task_items_from_db:
+        logger.info("資料庫中沒有待處理的任務。")
+        logger.info(TermColors.blue("--- 程式執行完畢 (無任務) ---"))
+        db_manager.close()
         sys.exit(0)
 
-    print(TermColors.green(f"成功載入 {len(task_items)} 個任務。"))
+    total_tasks_to_process = len(task_items_from_db)
+    logger.info(f"從資料庫成功載入 {total_tasks_to_process} 個待處理任務。")
 
-    print(TermColors.blue("\n--- 階段二：開始處理任務 ---"))
-    for index, item_data in enumerate(task_items):
-        print(f"\n{TermColors.green('='*10)} 處理項目 {index + 1}/{len(task_items)}: {item_data.get('title', '未知標題')} {TermColors.green('='*10)}")
-        print(f"  日期: {item_data.get('date', 'N/A')}, 連結: {item_data.get('url', 'N/A')}")
+    logger.info(TermColors.blue("\n--- 階段三：開始處理任務 ---"))
+    for index, task_row in enumerate(task_items_from_db):
+        item_data = dict(task_row) # 將資料庫行轉換為字典
+        task_id = item_data['task_id']
 
-        current_screenshots_for_item: list[Path] = []
+        logger.info(f"\n{TermColors.green('='*10)} 處理項目 {index + 1}/{total_tasks_to_process}: {item_data.get('title', '未知標題')} (ID: {task_id[:8]}...) {TermColors.green('='*10)}")
+        logger.info(f"  日期: {item_data.get('date', 'N/A')}, 連結: {item_data.get('url', 'N/A')}, 目前狀態: {item_data.get('status')}")
+
+        # 更新任務狀態為 'Browse' (或類似的正在處理狀態)
+        # 這裡可以根據實際流程細化狀態，例如 'opening_browser', 'capturing' 等
+        db_manager.update_task_status(task_id, 'Browse', None) # 清除舊的錯誤訊息
+
+        current_screenshots_for_item: list[Path] = [] # 用於存儲此任務當前會話中的截圖路徑
 
         initial_open_url = item_data.get('url')
         if initial_open_url and initial_open_url.strip().lower() != "遺失":
-            print(f"  {TermColors.blue('>>>')} 正在為您開啟網頁: {initial_open_url}")
-            manage_browser(url=initial_open_url, action="open")
+            logger.info(f"  {TermColors.blue('>>>')} 正在為您開啟網頁: {initial_open_url}")
+            # manage_browser 可能需要更新以支持 Playwright 和錯誤處理/CAPTCHA
+            manage_browser(url=initial_open_url, action="open") # 假設 manage_browser 內部處理 Playwright
         else:
-            print(f"  {TermColors.yellow('>>>')} 此項目無有效網址或標記為遺失，不自動開啟瀏覽器。")
+            logger.warning(f"  {TermColors.yellow('>>>')} 此項目無有效網址或標記為遺失，不自動開啟瀏覽器。")
+            # 如果URL無效，可以考慮直接將任務標記為失敗或需要人工介入
+            db_manager.update_task_status(task_id, 'failed', '無有效URL')
+            continue # 處理下一個任務
 
-        while True:
+
+        while True: # 內部循環處理單個任務的截圖、分析等操作
             user_command = get_user_action()
 
-            if user_command == "W":
-                print(f"  {TermColors.blue('>>>')} 執行截圖操作...")
-                saved_screenshot_path = capture_screenshot(
-                    item_data=item_data,
+            if user_command == "W": # 截圖
+                db_manager.update_task_status(task_id, 'capturing') # 更新狀態
+                logger.info(f"  {TermColors.blue('>>>')} 執行截圖操作...")
+                # capture_screenshot 可能需要 task_id 來關聯截圖記錄到資料庫
+                saved_screenshot_path_obj = capture_screenshot(
+                    item_data=item_data, # 包含 task_id, title 等
                     screenshot_dir=dir_paths["screenshots_dir"],
-                    current_screenshots_list=current_screenshots_for_item
+                    current_screenshots_list=current_screenshots_for_item # 用於UI顯示計數
                 )
-                if saved_screenshot_path:
-                    print(TermColors.green(f"  截圖已記錄，目前此項目共 {len(current_screenshots_for_item)} 張截圖。"))
+                if saved_screenshot_path_obj:
+                    # 將截圖記錄添加到資料庫的 screenshots 表
+                    db_manager.add_screenshot(task_id, str(saved_screenshot_path_obj))
+                    logger.info(f"  截圖已記錄到資料庫，目前此項目共 {len(current_screenshots_for_item)} 張新截圖。")
                 else:
-                    print(TermColors.red("  截圖失敗。"))
+                    logger.error("  截圖失敗。")
+                    db_manager.update_task_status(task_id, 'failed', '截圖操作失敗') # 可選，或保持 capturing
 
-            elif user_command == "ENTER":
-                if not current_screenshots_for_item:
-                    print(TermColors.yellow("  沒有截圖可供分析。如果您想跳過分析，請按 'S'。"))
+            elif user_command == "ENTER": # 提交分析
+                # 從資料庫獲取此任務的所有截圖 (包括之前未處理的)
+                all_screenshots_for_task_rows = db_manager.get_screenshots_for_task(task_id)
+                all_screenshot_paths_for_task = [Path(row['file_path']) for row in all_screenshots_for_task_rows]
+
+                if not all_screenshot_paths_for_task:
+                    logger.warning("  資料庫中沒有此任務的截圖可供分析。如果您想跳過分析，請按 'S'。")
                     continue
 
-                print(f"  {TermColors.blue('>>>')} 準備提交 {len(current_screenshots_for_item)} 張截圖進行分析...")
+                logger.info(f"  {TermColors.blue('>>>')} 準備提交 {len(all_screenshot_paths_for_task)} 張截圖進行分析 (從資料庫讀取)...")
+                db_manager.update_task_status(task_id, 'processing_gemini')
+
+                # analyze_with_gemini 可能需要 db_manager 來實現兩階段提交
                 analysis_success = analyze_with_gemini(
-                    item_data=item_data,
-                    screenshot_paths=[str(p) for p in current_screenshots_for_item],
+                    item_data=item_data, # 包含 task_id
+                    screenshot_paths=[str(p) for p in all_screenshot_paths_for_task],
                     api_pool_instance=api_pool_instance,
                     prompt_text=gemini_prompt_text,
-                    output_dir=dir_paths["processed_dir"]
+                    output_dir=dir_paths["processed_dir"],
+                    db_manager=db_manager # 傳遞 db_manager
                 )
                 if analysis_success:
-                    print(TermColors.green(f"  項目 '{item_data.get('title')}' 分析完成並儲存。"))
+                    db_manager.update_task_status(task_id, 'completed')
+                    logger.info(f"  項目 '{item_data.get('title')}' 分析完成並儲存，任務狀態更新為 'completed'。")
                 else:
-                    print(TermColors.red(f"  項目 '{item_data.get('title')}' 分析失敗。結果未儲存。"))
+                    # 錯誤訊息應由 analyze_with_gemini 內部或 APIPool 記錄到任務的 error_message 欄位
+                    # 此處假設 analyze_with_gemini 失敗時，已通過 db_manager 更新了 error_message
+                    # 如果 analyze_with_gemini 未更新狀態，則在此處更新
+                    # db_manager.update_task_status(task_id, 'failed', 'Gemini分析失敗或API錯誤') # 示範
+                    logger.error(f"  項目 '{item_data.get('title')}' 分析失敗。任務狀態可能已更新為 'failed' 或 'human_intervention_required'。")
 
-                current_screenshots_for_item.clear()
-                break
+                current_screenshots_for_item.clear() # 清空當前會話的截圖列表
+                break # 結束此任務的內部循環，處理下一個任務
 
-            elif user_command == "S":
-                print(TermColors.yellow(f"  已跳過項目 '{item_data.get('title')}' 的分析。"))
-                if current_screenshots_for_item:
-                    print(TermColors.yellow(f"  注意：先前為此項目截取的 {len(current_screenshots_for_item)} 張圖片將不會被分析。"))
+            elif user_command == "S": # 跳過
+                logger.warning(f"  已跳過項目 '{item_data.get('title')}' 的分析。")
+                db_manager.update_task_status(task_id, 'skipped', '使用者手動跳過')
+                if current_screenshots_for_item: # 理論上，跳過時不應該有未提交的截圖，但以防萬一
+                    logger.warning(f"  注意：先前為此項目截取的 {len(current_screenshots_for_item)} 張圖片將不會被分析。")
                     current_screenshots_for_item.clear()
-                break
+                break # 結束此任務的內部循環
 
-            elif user_command == "R":
+            elif user_command == "R": # 重新開啟網址
                 current_url_to_open = item_data.get('url')
                 if current_url_to_open and current_url_to_open.strip().lower() != "遺失":
-                    print(f"  {TermColors.blue('>>>')} 重新開啟網頁: {current_url_to_open}")
+                    logger.info(f"  {TermColors.blue('>>>')} 重新開啟網頁: {current_url_to_open}")
                     manage_browser(url=current_url_to_open, action="open")
+                    db_manager.update_task_status(task_id, 'Browse', '重新開啟網頁') # 重置狀態
                 else:
-                    print(f"  {TermColors.yellow('>>>')} 此項目無有效網址可重新開啟。")
+                    logger.warning(f"  {TermColors.yellow('>>>')} 此項目無有效網址可重新開啟。")
 
-            elif user_command == "Q":
-                print(TermColors.blue("\n使用者選擇退出程式。"))
-                if current_screenshots_for_item:
-                    confirm_quit = input(TermColors.yellow(f"  當前項目尚有 {len(current_screenshots_for_item)} 張未提交的截圖。確定要退出嗎？(Y/N): ")).strip().upper()
+            elif user_command == "Q": # 退出
+                logger.info(TermColors.blue("\n使用者選擇退出程式。"))
+                # 任務狀態在退出前保持其當前狀態 (例如 'capturing', 'Browse')
+                # 下次啟動時，它將從該狀態繼續 (或被視為未完成)
+                if current_screenshots_for_item: # 僅是 UI 提示
+                    confirm_quit = input(TermColors.yellow(f"  當前項目尚有 {len(current_screenshots_for_item)} 張新截取的圖片（可能已存DB）。確定要退出嗎？(Y/N): ")).strip().upper()
                     if confirm_quit != 'Y':
                         continue
 
-                print(TermColors.blue("--- 程式結束 ---"))
+                logger.info(TermColors.blue("--- 程式提前結束 ---"))
+                db_manager.close()
                 sys.exit(0)
 
-        print(f"  {TermColors.blue('>>>')} 項目 '{item_data.get('title')}' 處理完畢。")
-        manage_browser(action="close")
-        time.sleep(APP_CONFIG.get('interaction', {}).get('delay_between_items_seconds', 1))
+        logger.info(f"  {TermColors.blue('>>>')} 項目 '{item_data.get('title')}' 處理完畢。")
+        # 關閉瀏覽器頁面或上下文 (如果 Playwright 被用於此任務)
+        # manage_browser(action="close_page_or_context") # 假設有這樣的操作
+        manage_browser(action="close") # 保持原樣，假設關閉整個瀏覽器實例
 
-    print(TermColors.green("\n--- 所有任務已處理完畢 ---"))
-    print(TermColors.blue("--- 程式執行完畢 ---"))
+        delay = APP_CONFIG.get('interaction', {}).get('delay_between_items_seconds', 1)
+        if delay > 0:
+            logger.info(f"等待 {delay} 秒後處理下一個項目...")
+            time.sleep(delay)
+
+    logger.info(TermColors.green("\n--- 所有已載入的任務已處理完畢 ---"))
+    logger.info(TermColors.blue("--- 程式執行完畢 ---"))
+    db_manager.close()
+
 
 if __name__ == "__main__":
-    # Define project_root at the module level for functions that might need it
-    # This is already done at the top of the script in the try-except block.
-    # If functions are called before that block (e.g. by other modules importing this one),
-    # it might be an issue, but for direct execution, it's fine.
     main()
