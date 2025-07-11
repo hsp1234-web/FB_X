@@ -1,0 +1,2 @@
+# Placeholder for Gemini prompt
+Analyze the given image.

@@ -174,6 +174,7 @@ def setup_project_directories(base_output_relative_to_project_root: bool = False
     }
 
 def get_user_action() -> str:
+    # 恢復原始邏輯
     while True:
         logger.info("-" * 30)
         logger.info(f"{TermColors.blue('可用操作:')}")
@@ -240,128 +241,168 @@ def main():
     logger.info(f"從資料庫成功載入 {total_tasks_to_process} 個待處理任務。")
 
     logger.info(TermColors.blue("\n--- 階段三：開始處理任務 ---"))
-    for index, task_row in enumerate(task_items_from_db):
-        item_data = dict(task_row) # 將資料庫行轉換為字典
-        task_id = item_data['task_id']
+    try: # 使用 try...finally 來確保 Playwright 最終關閉
+        for index, task_row in enumerate(task_items_from_db):
+            item_data = dict(task_row) # 將資料庫行轉換為字典
+            task_id = item_data['task_id']
 
-        logger.info(f"\n{TermColors.green('='*10)} 處理項目 {index + 1}/{total_tasks_to_process}: {item_data.get('title', '未知標題')} (ID: {task_id[:8]}...) {TermColors.green('='*10)}")
-        logger.info(f"  日期: {item_data.get('date', 'N/A')}, 連結: {item_data.get('url', 'N/A')}, 目前狀態: {item_data.get('status')}")
+            logger.info(f"\n{TermColors.green('='*10)} 處理項目 {index + 1}/{total_tasks_to_process}: {item_data.get('title', '未知標題')} (ID: {task_id[:8]}...) {TermColors.green('='*10)}")
+            logger.info(f"  日期: {item_data.get('date', 'N/A')}, 連結: {item_data.get('url', 'N/A')}, 目前狀態: {item_data.get('status')}")
 
-        # 更新任務狀態為 'Browse' (或類似的正在處理狀態)
-        # 這裡可以根據實際流程細化狀態，例如 'opening_browser', 'capturing' 等
-        db_manager.update_task_status(task_id, 'Browse', None) # 清除舊的錯誤訊息
+            db_manager.update_task_status(task_id, 'Browse', None) # 清除舊的錯誤訊息
 
-        current_screenshots_for_item: list[Path] = [] # 用於存儲此任務當前會話中的截圖路徑
+            current_screenshots_for_item: list[Path] = [] # 用於存儲此任務當前會話中的截圖路徑
 
-        initial_open_url = item_data.get('url')
-        if initial_open_url and initial_open_url.strip().lower() != "遺失":
-            logger.info(f"  {TermColors.blue('>>>')} 正在為您開啟網頁: {initial_open_url}")
-            # manage_browser 可能需要更新以支持 Playwright 和錯誤處理/CAPTCHA
-            manage_browser(url=initial_open_url, action="open") # 假設 manage_browser 內部處理 Playwright
-        else:
-            logger.warning(f"  {TermColors.yellow('>>>')} 此項目無有效網址或標記為遺失，不自動開啟瀏覽器。")
-            # 如果URL無效，可以考慮直接將任務標記為失敗或需要人工介入
-            db_manager.update_task_status(task_id, 'failed', '無有效URL')
-            continue # 處理下一個任務
-
-
-        while True: # 內部循環處理單個任務的截圖、分析等操作
-            user_command = get_user_action()
-
-            if user_command == "W": # 截圖
-                db_manager.update_task_status(task_id, 'capturing') # 更新狀態
-                logger.info(f"  {TermColors.blue('>>>')} 執行截圖操作...")
-                # capture_screenshot 可能需要 task_id 來關聯截圖記錄到資料庫
-                saved_screenshot_path_obj = capture_screenshot(
-                    item_data=item_data, # 包含 task_id, title 等
-                    screenshot_dir=dir_paths["screenshots_dir"],
-                    current_screenshots_list=current_screenshots_for_item # 用於UI顯示計數
+            initial_open_url = item_data.get('url')
+            browser_opened_successfully = False
+            if initial_open_url and initial_open_url.strip().lower() != "遺失":
+                logger.info(f"  {TermColors.blue('>>>')} 正在為您開啟網頁: {initial_open_url}")
+                # manage_browser 現在需要 item_data 和 db_manager
+                browser_action_result = manage_browser(
+                    item_data=item_data,
+                    db_manager=db_manager,
+                    url=initial_open_url,
+                    action="open"
                 )
-                if saved_screenshot_path_obj:
-                    # 將截圖記錄添加到資料庫的 screenshots 表
-                    db_manager.add_screenshot(task_id, str(saved_screenshot_path_obj))
-                    logger.info(f"  截圖已記錄到資料庫，目前此項目共 {len(current_screenshots_for_item)} 張新截圖。")
-                else:
-                    logger.error("  截圖失敗。")
-                    db_manager.update_task_status(task_id, 'failed', '截圖操作失敗') # 可選，或保持 capturing
 
-            elif user_command == "ENTER": # 提交分析
-                # 從資料庫獲取此任務的所有截圖 (包括之前未處理的)
-                all_screenshots_for_task_rows = db_manager.get_screenshots_for_task(task_id)
-                all_screenshot_paths_for_task = [Path(row['file_path']) for row in all_screenshots_for_task_rows]
+                if browser_action_result == "success":
+                    browser_opened_successfully = True
+                elif browser_action_result == "captcha_detected":
+                    # CAPTCHA 已由 manage_browser 內部處理，包括狀態更新和使用者互動
+                    # run_pipeline 可以決定是跳過此任務的後續步驟，還是允許使用者在處理完 CAPTCHA 後繼續
+                    logger.warning(f"  CAPTCHA 已處理，任務 {task_id[:8]} 等待後續指令 (目前將繼續詢問操作)。")
+                    # 這裡可以選擇 continue 到下一個任務，或者讓使用者決定是否繼續處理當前任務
+                    # 為了保持原有的 get_user_action() 流程，我們暫時允許繼續
+                    browser_opened_successfully = True # 假設人工干預後頁面可用
+                elif browser_action_result == "url_invalid":
+                    logger.error(f"  網址 '{initial_open_url}' 無效，無法開啟。")
+                    db_manager.update_task_status(task_id, 'failed', '無效的URL')
+                    continue # 處理下一個任務
+                else: # "error"
+                    logger.error(f"  開啟網頁 '{initial_open_url}' 時發生錯誤。")
+                    # 錯誤已由 manage_browser 記錄到 DB
+                    continue # 處理下一個任務
+            else:
+                logger.warning(f"  {TermColors.yellow('>>>')} 此項目無有效網址或標記為遺失，不自動開啟瀏覽器。")
+                db_manager.update_task_status(task_id, 'failed', '無有效URL')
+                continue # 處理下一個任務
 
-                if not all_screenshot_paths_for_task:
-                    logger.warning("  資料庫中沒有此任務的截圖可供分析。如果您想跳過分析，請按 'S'。")
-                    continue
+            if not browser_opened_successfully and not browser_action_result == "captcha_detected": # 如果 CAPTCHA 算作某種程度的成功開啟
+                logger.info(f"  由於瀏覽器未能成功開啟，跳過項目 {task_id[:8]} 的後續操作。")
+                continue
 
-                logger.info(f"  {TermColors.blue('>>>')} 準備提交 {len(all_screenshot_paths_for_task)} 張截圖進行分析 (從資料庫讀取)...")
-                db_manager.update_task_status(task_id, 'processing_gemini')
 
-                # analyze_with_gemini 可能需要 db_manager 來實現兩階段提交
-                analysis_success = analyze_with_gemini(
-                    item_data=item_data, # 包含 task_id
-                    screenshot_paths=[str(p) for p in all_screenshot_paths_for_task],
-                    api_pool_instance=api_pool_instance,
-                    prompt_text=gemini_prompt_text,
-                    output_dir=dir_paths["processed_dir"],
-                    db_manager=db_manager # 傳遞 db_manager
-                )
-                if analysis_success:
-                    db_manager.update_task_status(task_id, 'completed')
-                    logger.info(f"  項目 '{item_data.get('title')}' 分析完成並儲存，任務狀態更新為 'completed'。")
-                else:
-                    # 錯誤訊息應由 analyze_with_gemini 內部或 APIPool 記錄到任務的 error_message 欄位
-                    # 此處假設 analyze_with_gemini 失敗時，已通過 db_manager 更新了 error_message
-                    # 如果 analyze_with_gemini 未更新狀態，則在此處更新
-                    # db_manager.update_task_status(task_id, 'failed', 'Gemini分析失敗或API錯誤') # 示範
-                    logger.error(f"  項目 '{item_data.get('title')}' 分析失敗。任務狀態可能已更新為 'failed' 或 'human_intervention_required'。")
+            while True: # 內部循環處理單個任務的截圖、分析等操作
+                user_command = get_user_action()
 
-                current_screenshots_for_item.clear() # 清空當前會話的截圖列表
-                break # 結束此任務的內部循環，處理下一個任務
+                if user_command == "W": # 截圖
+                    db_manager.update_task_status(task_id, 'capturing') # 更新狀態
+                    logger.info(f"  {TermColors.blue('>>>')} 執行截圖操作...")
+                    saved_screenshot_path_obj = capture_screenshot(
+                        item_data=item_data,
+                        screenshot_dir=dir_paths["screenshots_dir"],
+                        current_screenshots_list=current_screenshots_for_item
+                    )
+                    if saved_screenshot_path_obj:
+                        db_manager.add_screenshot(task_id, str(saved_screenshot_path_obj))
+                        logger.info(f"  截圖已記錄到資料庫，目前此項目共 {len(current_screenshots_for_item)} 張新截圖。")
+                    else:
+                        logger.error("  截圖失敗。")
+                        db_manager.update_task_status(task_id, 'failed', '截圖操作失敗')
 
-            elif user_command == "S": # 跳過
-                logger.warning(f"  已跳過項目 '{item_data.get('title')}' 的分析。")
-                db_manager.update_task_status(task_id, 'skipped', '使用者手動跳過')
-                if current_screenshots_for_item: # 理論上，跳過時不應該有未提交的截圖，但以防萬一
-                    logger.warning(f"  注意：先前為此項目截取的 {len(current_screenshots_for_item)} 張圖片將不會被分析。")
-                    current_screenshots_for_item.clear()
-                break # 結束此任務的內部循環
+                elif user_command == "ENTER": # 提交分析
+                    all_screenshots_for_task_rows = db_manager.get_screenshots_for_task(task_id)
+                    all_screenshot_paths_for_task = [Path(row['file_path']) for row in all_screenshots_for_task_rows]
 
-            elif user_command == "R": # 重新開啟網址
-                current_url_to_open = item_data.get('url')
-                if current_url_to_open and current_url_to_open.strip().lower() != "遺失":
-                    logger.info(f"  {TermColors.blue('>>>')} 重新開啟網頁: {current_url_to_open}")
-                    manage_browser(url=current_url_to_open, action="open")
-                    db_manager.update_task_status(task_id, 'Browse', '重新開啟網頁') # 重置狀態
-                else:
-                    logger.warning(f"  {TermColors.yellow('>>>')} 此項目無有效網址可重新開啟。")
-
-            elif user_command == "Q": # 退出
-                logger.info(TermColors.blue("\n使用者選擇退出程式。"))
-                # 任務狀態在退出前保持其當前狀態 (例如 'capturing', 'Browse')
-                # 下次啟動時，它將從該狀態繼續 (或被視為未完成)
-                if current_screenshots_for_item: # 僅是 UI 提示
-                    confirm_quit = input(TermColors.yellow(f"  當前項目尚有 {len(current_screenshots_for_item)} 張新截取的圖片（可能已存DB）。確定要退出嗎？(Y/N): ")).strip().upper()
-                    if confirm_quit != 'Y':
+                    if not all_screenshot_paths_for_task:
+                        logger.warning("  資料庫中沒有此任務的截圖可供分析。如果您想跳過分析，請按 'S'。")
                         continue
 
-                logger.info(TermColors.blue("--- 程式提前結束 ---"))
-                db_manager.close()
-                sys.exit(0)
+                    logger.info(f"  {TermColors.blue('>>>')} 準備提交 {len(all_screenshot_paths_for_task)} 張截圖進行分析 (從資料庫讀取)...")
+                    db_manager.update_task_status(task_id, 'processing_gemini')
 
-        logger.info(f"  {TermColors.blue('>>>')} 項目 '{item_data.get('title')}' 處理完畢。")
-        # 關閉瀏覽器頁面或上下文 (如果 Playwright 被用於此任務)
-        # manage_browser(action="close_page_or_context") # 假設有這樣的操作
-        manage_browser(action="close") # 保持原樣，假設關閉整個瀏覽器實例
+                    analysis_success = analyze_with_gemini(
+                        item_data=item_data,
+                        screenshot_paths=[str(p) for p in all_screenshot_paths_for_task],
+                        api_pool_instance=api_pool_instance,
+                        prompt_text=gemini_prompt_text,
+                        output_dir=dir_paths["processed_dir"],
+                        db_manager=db_manager
+                    )
+                    if analysis_success:
+                        db_manager.update_task_status(task_id, 'completed')
+                        logger.info(f"  項目 '{item_data.get('title')}' 分析完成並儲存，任務狀態更新為 'completed'。")
+                    else:
+                        logger.error(f"  項目 '{item_data.get('title')}' 分析失敗。任務狀態可能已更新為 'failed' 或 'human_intervention_required'。")
 
-        delay = APP_CONFIG.get('interaction', {}).get('delay_between_items_seconds', 1)
-        if delay > 0:
-            logger.info(f"等待 {delay} 秒後處理下一個項目...")
-            time.sleep(delay)
+                    current_screenshots_for_item.clear()
+                    break
 
-    logger.info(TermColors.green("\n--- 所有已載入的任務已處理完畢 ---"))
-    logger.info(TermColors.blue("--- 程式執行完畢 ---"))
-    db_manager.close()
+                elif user_command == "S": # 跳過
+                    logger.warning(f"  已跳過項目 '{item_data.get('title')}' 的分析。")
+                    db_manager.update_task_status(task_id, 'skipped', '使用者手動跳過')
+                    if current_screenshots_for_item:
+                        logger.warning(f"  注意：先前為此項目截取的 {len(current_screenshots_for_item)} 張圖片將不會被分析。")
+                        current_screenshots_for_item.clear()
+                    break
+
+                elif user_command == "R": # 重新開啟網址
+                    current_url_to_open = item_data.get('url')
+                    if current_url_to_open and current_url_to_open.strip().lower() != "遺失":
+                        logger.info(f"  {TermColors.blue('>>>')} 重新開啟網頁: {current_url_to_open}")
+                        reopen_result = manage_browser(
+                            item_data=item_data,
+                            db_manager=db_manager,
+                            url=current_url_to_open,
+                            action="open"
+                        )
+                        if reopen_result == "success":
+                            db_manager.update_task_status(task_id, 'Browse', '重新開啟網頁')
+                        elif reopen_result == "captcha_detected":
+                            logger.warning(f"  重新開啟時偵測到 CAPTCHA，任務 {task_id[:8]} 等待後續指令。")
+                        # 其他錯誤情況已由 manage_browser 內部處理 DB 狀態
+                    else:
+                        logger.warning(f"  {TermColors.yellow('>>>')} 此項目無有效網址可重新開啟。")
+
+                elif user_command == "Q": # 退出
+                    logger.info(TermColors.blue("\n使用者選擇退出程式。"))
+                    if current_screenshots_for_item:
+                        confirm_quit = input(TermColors.yellow(f"  當前項目尚有 {len(current_screenshots_for_item)} 張新截取的圖片（可能已存DB）。確定要退出嗎？(Y/N): ")).strip().upper()
+                        if confirm_quit != 'Y':
+                            continue
+                    # 在退出前關閉 Playwright
+                    logger.info(TermColors.blue("正在關閉 Playwright 資源..."))
+                    manage_browser(item_data={"task_id": "cleanup"}, db_manager=db_manager, action="close_context_and_browser")
+                    logger.info(TermColors.blue("--- 程式提前結束 ---"))
+                    db_manager.close()
+                    sys.exit(0)
+
+            logger.info(f"  {TermColors.blue('>>>')} 項目 '{item_data.get('title')}' 處理完畢。")
+            # 關閉當前 Playwright 分頁
+            manage_browser(item_data=item_data, db_manager=db_manager, action="close")
+
+            delay = APP_CONFIG.get('interaction', {}).get('delay_between_items_seconds', 1)
+            if delay > 0:
+                logger.info(f"等待 {delay} 秒後處理下一個項目...")
+                time.sleep(delay)
+
+        logger.info(TermColors.green("\n--- 所有已載入的任務已處理完畢 ---"))
+
+    except KeyboardInterrupt:
+        logger.warning(TermColors.yellow("\n偵測到使用者中斷 (Ctrl+C)。正在嘗試優雅退出..."))
+        # 任務狀態應保持中斷前的狀態
+    except Exception as e_main_loop:
+        logger.error(f"主處理循環中發生未預期錯誤: {e_main_loop}", exc_info=True)
+        # 可以在此處嘗試更新當前任務狀態為 failed
+        if 'task_id' in locals() and task_id: # 檢查 task_id 是否已定義
+             db_manager.update_task_status(task_id, 'failed', f'主循環錯誤: {str(e_main_loop)[:200]}')
+    finally:
+        # 確保 Playwright 資源在程式結束時被關閉
+        logger.info(TermColors.blue("\n正在進行最終清理，關閉 Playwright 資源..."))
+        # 傳遞一個通用的 item_data，因為此時可能沒有特定任務上下文
+        manage_browser(item_data={"task_id": "final_cleanup"}, db_manager=db_manager, action="close_context_and_browser")
+        logger.info(TermColors.blue("--- 程式執行完畢 ---"))
+        db_manager.close()
 
 
 if __name__ == "__main__":

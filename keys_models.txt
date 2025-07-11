@@ -1,0 +1,2 @@
+API_KEY,MODEL_NAME
+AIzaSyFAKEKEY1234567890abcdefghIJKLMN,models/gemini-1.5-flash-latest

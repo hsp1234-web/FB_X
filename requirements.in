@@ -8,6 +8,7 @@ PyYAML
 # 核心工具
 pillow
 keyboard
+playwright
 
 # 測試框架
 pytest
